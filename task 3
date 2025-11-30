@@ -1,0 +1,125 @@
+# persistence.py
+import json
+from pathlib import Path
+from datetime import datetime
+import logging
+from typing import List, Optional
+
+from book import Book  # assumes Book class from Task 1 is in book.py
+
+logger = logging.getLogger(__name__)
+
+
+class LibraryInventory:
+    def __init__(self, storage_path: Path):
+        """
+        storage_path: Path to the JSON file used for persistence (e.g. Path("catalog.json"))
+        """
+        self.storage_path = Path(storage_path)
+        self.books: List[Book] = []
+        # Try to load existing catalog on init
+        self.load()
+
+    # -------------------------
+    # Inventory operations (example)
+    # -------------------------
+    def add_book(self, book: Book) -> None:
+        if self.search_by_isbn(book.isbn) is not None:
+            raise ValueError(f"Book with ISBN {book.isbn} already exists.")
+        self.books.append(book)
+        # persist after change
+        self.save()
+
+    def search_by_title(self, title_substr: str) -> List[Book]:
+        q = title_substr.lower().strip()
+        return [b for b in self.books if q in b.title.lower()]
+
+    def search_by_isbn(self, isbn: str) -> Optional[Book]:
+        isbn = isbn.strip()
+        for b in self.books:
+            if b.isbn == isbn:
+                return b
+        return None
+
+    def display_all(self) -> List[str]:
+        return [str(b) for b in self.books]
+
+    # -------------------------
+    # Persistence: save & load
+    # -------------------------
+    def save(self) -> None:
+        """
+        Save current catalog to JSON file. Creates parent directories if needed.
+        Raises exceptions if write fails.
+        """
+        try:
+            # Ensure parent directory exists
+            if self.storage_path.parent:
+                self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Convert Book objects to serializable dicts
+            data = [b.to_dict() for b in self.books]
+
+            # Write to a temporary file then replace (atomic-ish)
+            tmp_path = self.storage_path.with_suffix(self.storage_path.suffix + ".tmp")
+            with tmp_path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            # Replace the original file
+            tmp_path.replace(self.storage_path)
+            logger.info("Saved %d books to %s", len(self.books), self.storage_path)
+        except Exception as e:
+            logger.exception("Failed to save catalog to %s: %s", self.storage_path, e)
+            raise
+
+    def load(self) -> None:
+        """
+        Load catalog from JSON file. If file is missing -> start with empty list.
+        If file is corrupted (invalid JSON or missing required fields) -> rename corrupted file
+        and start with empty catalog.
+        """
+        if not self.storage_path.exists():
+            logger.info("Catalog file %s not found — starting with an empty catalog.", self.storage_path)
+            self.books = []
+            return
+
+        try:
+            with self.storage_path.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+
+            if not isinstance(raw, list):
+                raise ValueError("Catalog JSON root must be a list of book objects.")
+
+            loaded_books: List[Book] = []
+            for idx, item in enumerate(raw):
+                if not isinstance(item, dict):
+                    logger.warning("Skipping invalid entry (not a dict) at index %d: %r", idx, item)
+                    continue
+                title = item.get("title", "").strip()
+                author = item.get("author", "").strip()
+                isbn = item.get("isbn", "").strip()
+                status = item.get("status", "available")
+                if not title or not isbn:
+                    logger.warning("Skipping entry with missing title/isbn at index %d: %r", idx, item)
+                    continue
+                # create Book instance (assumes Book accepts status)
+                loaded_books.append(Book(title=title, author=author, isbn=isbn, status=status))
+
+            self.books = loaded_books
+            logger.info("Loaded %d books from %s", len(self.books), self.storage_path)
+
+        except (json.JSONDecodeError, ValueError) as e:
+            # Handle corrupted file: move it aside with timestamp so user can inspect it
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            corrupt_path = self.storage_path.with_name(f"{self.storage_path.name}.corrupt.{ts}")
+            try:
+                self.storage_path.replace(corrupt_path)
+                logger.error("Catalog file %s is corrupted. Moved to %s and starting with an empty catalog. Error: %s",
+                             self.storage_path, corrupt_path, e)
+            except Exception as move_err:
+                logger.exception("Failed to move corrupted catalog file: %s", move_err)
+            self.books = []
+        except Exception as e:
+            # Catch-all to avoid crashing on unexpected IO errors — start with empty catalog but log.
+            logger.exception("Unexpected error while loading catalog %s: %s", self.storage_path, e)
+            self.books = []
