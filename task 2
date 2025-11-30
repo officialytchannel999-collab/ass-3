@@ -1,0 +1,37 @@
+from book import Book   # Make sure Book class is in book.py
+
+
+class LibraryInventory:
+    def __init__(self):
+        # Maintain a list of Book objects
+        self.books = []
+
+    def add_book(self, book):
+        """Add a new Book object to the inventory."""
+        # Optional: prevent duplicate ISBNs
+        if self.search_by_isbn(book.isbn) is not None:
+            print("A book with this ISBN already exists.")
+            return False
+
+        self.books.append(book)
+        return True
+
+    def search_by_title(self, title):
+        """Return a list of books whose titles contain the given text (case-insensitive)."""
+        title = title.lower()
+        return [book for book in self.books if title in book.title.lower()]
+
+    def search_by_isbn(self, isbn):
+        """Return the book with the given ISBN, or None if not found."""
+        for book in self.books:
+            if book.isbn == isbn:
+                return book
+        return None
+
+    def display_all(self):
+        """Return a list of strings describing all books."""
+        if not self.books:
+            return ["No books in inventory."]
+
+        return [str(book) for book in self.books]
+
