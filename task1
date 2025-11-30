@@ -1,1 +1,46 @@
-uhfvid
+class Book:
+    def __init__(self, title, author, isbn, status="available"):
+        self.title = title
+        self.author = author
+        self.isbn = isbn
+        # Ensure status is valid
+        if status not in ("available", "issued"):
+            status = "available"
+        self.status = status
+
+    def __str__(self):
+        return f"{self.title} by {self.author} (ISBN: {self.isbn}) - {self.status}"
+
+    def to_dict(self):
+        """Return a dictionary representation of the Book."""
+        return {
+            "title": self.title,
+            "author": self.author,
+            "isbn": self.isbn,
+            "status": self.status
+        }
+
+    def is_available(self):
+        """Return True if the book is available."""
+        return self.status == "available"
+
+    def issue(self):
+        """
+        Issue the book if it is available.
+        Returns True if issued successfully, False if already issued.
+        """
+        if self.is_available():
+            self.status = "issued"
+            return True
+        return False
+
+    def return_book(self):
+        """
+        Return the book if it is currently issued.
+        Returns True if returned successfully, False if already available.
+        """
+        if not self.is_available():
+            self.status = "available"
+            return True
+        return False
+
