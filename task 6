@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+"""
+Single-file Library Inventory Manager (Tasks 1-6 combined)
+
+Usage:
+    - Run interactive CLI (default):
+        python library_app.py
+
+    - Run CLI explicitly:
+        python library_app.py --cli
+
+    - Run unit tests:
+        python library_app.py --test
+
+This single file contains:
+- Book (Task 1)
+- LibraryInventory with JSON persistence & logging (Tasks 2 & 3 & 5)
+- Menu-driven CLI (Task 4)
+- Packaging conveniences (Task 6) -- everything is self-contained
+- A small unittest test-suite (bonus)
+
+Notes:
+- Catalog is persisted to `catalog.json` in the current working directory.
+- Logs are written to `logs/library_manager.log`.
+- Designed to be dropped into a project root and run immediately.
+"""
+
+from __future__ import annotations
+import json
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import List, Optional
+from datetime import datetime
+import logging
+import argparse
+import sys
+import tempfile
+import unittest
+
+# -------------------------
+# Logging configuration
+# -------------------------
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "library_manager.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("library_manager")
+
+# -------------------------
+# Task 1: Book class
+# -------------------------
+@dataclass
+class Book:
+    title: str
+    author: str
+    isbn: str
+    status: str = "available"  # "available" or "issued"
+
+    def __post_init__(self):
+        if self.status not in ("available", "issued"):
+            self.status = "available"
+        # Normalize fields (strip whitespace)
+        self.title = self.title.strip()
+        self.author = self.author.strip()
+        self.isbn = self.isbn.strip()
+
+    def __str__(self) -> str:
+        return f"{self.title} by {self.author} (ISBN: {self.isbn}) - {self.status}"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def is_available(self) -> bool:
+        return self.status == "available"
+
+    def issue(self) -> bool:
+        if self.is_available():
+            self.status = "issued"
+            return True
+        return False
+
+    def return_book(self) -> bool:
+        if not self.is_available():
+            self.status = "available"
+            return True
+        return False
+
+
+# -------------------------
+# Tasks 2 & 3 & 5: LibraryInventory with JSON persistence & logging
+# -------------------------
+class LibraryInventory:
+    def __init__(self, storage_path: Optional[Path] = None):
+        """
+        storage_path: Path to JSON file (defaults to ./catalog.json)
+        """
+        self.storage_path = Path(storage_path) if storage_path else Path("catalog.json")
+        self.books: List[Book] = []
+        logger.info("Initializing LibraryInventory with storage: %s", self.storage_path)
+        self.load()
+
+    # ---------- Inventory operations ----------
+    def add_book(self, book: Book) -> None:
+        try:
+            if self.search_by_isbn(book.isbn) is not None:
+                logger.info("Attempted to add duplicate ISBN: %s", book.isbn)
+                raise ValueError(f"Book with ISBN {book.isbn} already exists.")
+            self.books.append(book)
+            logger.info("Added book: %s", book)
+            self.save()
+        except Exception:
+            logger.exception("Failed to add book: %s", book)
+            raise
+
+    def search_by_title(self, title_substr: str) -> List[Book]:
+        q = title_substr.lower().strip()
+        results = [b for b in self.books if q in b.title.lower()]
+        logger.debug("search_by_title('%s') -> %d results", title_substr, len(results))
+        return results
+
+    def search_by_isbn(self, isbn: str) -> Optional[Book]:
+        isbn = isbn.strip()
+        for b in self.books:
+            if b.isbn == isbn:
+                logger.debug("search_by_isbn found: %s", b)
+                return b
+        logger.debug("search_by_isbn('%s') -> not found", isbn)
+        return None
+
+    def display_all(self) -> List[str]:
+        return [str(b) for b in self.books]
+
+    def issue_book(self, isbn: str) -> bool:
+        book = self.search_by_isbn(isbn)
+        if book is None:
+            logger.info("Issue failed; ISBN not found: %s", isbn)
+            raise LookupError(f"No book with ISBN {isbn} found.")
+        if book.issue():
+            logger.info("Book issued: %s", book)
+            self.save()
+            return True
+        logger.info("Issue attempted but book already issued: %s", book)
+        return False
+
+    def return_book(self, isbn: str) -> bool:
+        book = self.search_by_isbn(isbn)
+        if book is None:
+            logger.info("Return failed; ISBN not found: %s", isbn)
+            raise LookupError(f"No book with ISBN {isbn} found.")
+        if book.return_book():
+            logger.info("Book returned: %s", book)
+            self.save()
+            return True
+        logger.info("Return attempted but book already available: %s", book)
+        return False
+
+    # ---------- Persistence ----------
+    def save(self) -> None:
+        """
+        Save catalog to JSON file using a temp-file-then-replace pattern and robust exception handling.
+        """
+        tmp_path = None
+        try:
+            data = [b.to_dict() for b in self.books]
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write to a named temporary file in the same directory (for atomic replace)
+            dir_for_tmp = self.storage_path.parent or Path(".")
+            fd, tmp_name = tempfile.mkstemp(prefix=".catalog.", dir=str(dir_for_tmp))
+            tmp_path = Path(tmp_name)
+            try:
+                with open(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                # Replace original file
+                tmp_path.replace(self.storage_path)
+                logger.info("Saved %d books to %s", len(self.books), self.storage_path)
+            except Exception:
+                # Ensure the tmp file is removed if something goes wrong
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+        except Exception:
+            logger.exception("Failed to save inventory to %s", self.storage_path)
+            raise
+
+    def load(self) -> None:
+        """
+        Load catalog from JSON; handle missing/corrupted files gracefully.
+        Uses try-except-finally to ensure robust behavior.
+        """
+        if not self.storage_path.exists():
+            logger.info("Catalog file not found; starting with an empty catalog: %s", self.storage_path)
+            self.books = []
+            return
+
+        f = None
+        try:
+            f = self.storage_path.open("r", encoding="utf-8")
+            raw = json.load(f)
+            if not isinstance(raw, list):
+                raise ValueError("Catalog JSON root must be a list.")
+
+            loaded: List[Book] = []
+            for idx, item in enumerate(raw):
+                if not isinstance(item, dict):
+                    logger.warning("Skipping non-dict entry at index %d: %r", idx, item)
+                    continue
+                title = item.get("title", "").strip()
+                author = item.get("author", "").strip()
+                isbn = item.get("isbn", "").strip()
+                status = item.get("status", "available")
+                if not title or not isbn:
+                    logger.warning("Skipping entry with missing title/isbn at index %d: %r", idx, item)
+                    continue
+                loaded.append(Book(title=title, author=author, isbn=isbn, status=status))
+
+            self.books = loaded
+            logger.info("Loaded %d books from %s", len(self.books), self.storage_path)
+
+        except (json.JSONDecodeError, ValueError) as e:
+            # Handle corrupted file: move it aside with timestamp so user can inspect it
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            corrupt_path = self.storage_path.with_name(f"{self.storage_path.name}.corrupt.{ts}")
+            try:
+                self.storage_path.replace(corrupt_path)
+                logger.error(
+                    "Catalog file %s is corrupted. Moved to %s and starting with an empty catalog. Error: %s",
+                    self.storage_path, corrupt_path, e
+                )
+            except Exception:
+                logger.exception("Failed to move corrupted catalog file.")
+            self.books = []
+        except Exception:
+            logger.exception("Unexpected error while loading catalog: %s", self.storage_path)
+            self.books = []
+        finally:
+            if f:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            logger.debug("Completed load operation for %s", self.storage_path)
+
+
+# -------------------------
+# Task 4: CLI
+# -------------------------
+def safe_input(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except (KeyboardInterrupt, EOFError):
+        print("\nGoodbye.")
+        raise SystemExit
+
+
+def print_menu() -> None:
+    print("\nLibrary Inventory Manager")
+    print("-------------------------")
+    print("1. Add Book")
+    print("2. Issue Book")
+    print("3. Return Book")
+    print("4. View All Books")
+    print("5. Search (Title / ISBN)")
+    print("6. Exit")
+
+
+def add_book_flow(inv: LibraryInventory) -> None:
+    print("\nAdd a New Book")
+    print("--------------")
+    title = safe_input("Title: ").strip()
+    if not title:
+        print("Title is required.")
+        return
+    author = safe_input("Author: ").strip()
+    if not author:
+        print("Author is required.")
+        return
+    isbn = safe_input("ISBN: ").strip()
+    if not isbn:
+        print("ISBN is required.")
+        return
+
+    book = Book(title=title, author=author, isbn=isbn)
+    try:
+        inv.add_book(book)
+        print("Book added successfully.")
+    except ValueError as ve:
+        print("Error:", ve)
+    except Exception:
+        print("Unexpected error while adding book. See logs.")
+
+
+def issue_book_flow(inv: LibraryInventory) -> None:
+    print("\nIssue Book")
+    print("----------")
+    isbn = safe_input("Enter ISBN to issue: ").strip()
+    if not isbn:
+        print("ISBN is required.")
+        return
+    try:
+        if inv.issue_book(isbn):
+            print("Book issued successfully.")
+        else:
+            print("Book was already issued.")
+    except LookupError as le:
+        print("Error:", le)
+    except Exception:
+        print("Unexpected error while issuing book. See logs.")
+
+
+def return_book_flow(inv: LibraryInventory) -> None:
+    print("\nReturn Book")
+    print("-----------")
+    isbn = safe_input("Enter ISBN to return: ").strip()
+    if not isbn:
+        print("ISBN is required.")
+        return
+    try:
+        if inv.return_book(isbn):
+            print("Book returned successfully.")
+        else:
+            print("Book was not issued.")
+    except LookupError as le:
+        print("Error:", le)
+    except Exception:
+        print("Unexpected error while returning book. See logs.")
+
+
+def view_all_flow(inv: LibraryInventory) -> None:
+    print("\nAll Books in Catalog")
+    print("--------------------")
+    entries = inv.display_all()
+    if not entries:
+        print("No books in catalog.")
+        return
+    for idx, line in enumerate(entries, start=1):
+        print(f"{idx}. {line}")
+
+
+def search_flow(inv: LibraryInventory) -> None:
+    print("\nSearch")
+    print("------")
+    print("1. By Title (partial)")
+    print("2. By ISBN (exact)")
+    choice = safe_input("Choice (1/2): ").strip()
+    if choice == "1":
+        q = safe_input("Enter full or partial title: ").strip()
+        if not q:
+            print("Search query required.")
+            return
+        results = inv.search_by_title(q)
+        if not results:
+            print("No matching books found.")
+            return
+        for b in results:
+            print(b)
+    elif choice == "2":
+        q = safe_input("Enter ISBN: ").strip()
+        if not q:
+            print("ISBN required.")
+            return
+        b = inv.search_by_isbn(q)
+        if b:
+            print(b)
+        else:
+            print("No book found with that ISBN.")
+    else:
+        print("Invalid choice.")
+
+
+def run_cli(storage: Optional[Path] = None) -> None:
+    inv = LibraryInventory(storage) if storage else LibraryInventory()
+    while True:
+        print_menu()
+        choice = safe_input("Select option (1-6): ").strip()
+        if choice == "1":
+            add_book_flow(inv)
+        elif choice == "2":
+            issue_book_flow(inv)
+        elif choice == "3":
+            return_book_flow(inv)
+        elif choice == "4":
+            view_all_flow(inv)
+        elif choice == "5":
+            search_flow(inv)
+        elif choice == "6":
+            print("Exiting. Goodbye!")
+            try:
+                inv.save()
+            except Exception:
+                pass
+            break
+        else:
+            print("Invalid selection. Try again.")
+
+
+# -------------------------
+# Bonus: Unit tests
+# -------------------------
+class TestLibraryInventory(unittest.TestCase):
+    def setUp(self):
+        tf = tempfile.NamedTemporaryFile(delete=False)
+        tf.close()
+        self.tmpfile = Path(tf.name)
+        # ensure empty start
+        try:
+            self.tmpfile.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self.inv = LibraryInventory(self.tmpfile)
+
+    def tearDown(self):
+        try:
+            self.tmpfile.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def test_add_and_search(self):
+        b = Book(title="Test Driven Development", author="Kent Beck", isbn="1111")
+        self.inv.add_book(b)
+        found = self.inv.search_by_isbn("1111")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.title, b.title)
+
+    def test_issue_and_return(self):
+        b = Book(title="Clean Code", author="Robert C. Martin", isbn="2222")
+        self.inv.add_book(b)
+        self.assertTrue(self.inv.issue_book("2222"))
+        # cannot issue again
+        self.assertFalse(self.inv.issue_book("2222"))
+        self.assertTrue(self.inv.return_book("2222"))
+        # cannot return again
+        self.assertFalse(self.inv.return_book("2222"))
+
+    def test_persistence(self):
+        b = Book(title="Persistence Book", author="Author", isbn="3333")
+        self.inv.add_book(b)
+        # create new inventory that loads from same file
+        inv2 = LibraryInventory(self.tmpfile)
+        found = inv2.search_by_isbn("3333")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.title, "Persistence Book")
+
+
+# -------------------------
+# Helper to create README/.gitignore/requirements (optional)
+# -------------------------
+def write_aux_files(project_root: Path = Path(".")) -> None:
+    """
+    Optional helper to write README.md, .gitignore, requirements.txt into project root.
+    Call this if you want those files created by the script.
+    """
+    try:
+        readme = project_root / "README.md"
+        gitignore = project_root / ".gitignore"
+        reqs = project_root / "requirements.txt"
+
+        if not readme.exists():
+            readme.write_text(
+                "# Library Inventory Manager\n\n"
+                "Single-file implementation containing Book, LibraryInventory, CLI, and tests.\n\n"
+                "Usage:\n\n"
+                "```bash\n"
+                "python library_app.py      # runs CLI\n"
+                "python library_app.py --test  # runs unit tests\n"
+                "```\n", encoding="utf-8"
+            )
+            logger.info("Wrote README.md")
+
+        if not gitignore.exists():
+            gitignore.write_text(
+                "__pycache__/\n"
+                "*.pyc\n"
+                "catalog.json\n"
+                "logs/\n"
+                "*.log\n"
+                ".vscode/\n"
+                ".env\n", encoding="utf-8"
+            )
+            logger.info("Wrote .gitignore")
+
+        if not reqs.exists():
+            reqs.write_text("# No external dependencies required for base project\n", encoding="utf-8")
+            logger.info("Wrote requirements.txt")
+    except Exception:
+        logger.exception("Failed to write aux files.")
+
+
+# -------------------------
+# CLI entrypoint
+# -------------------------
+def parse_args(argv: Optional[List[str]] = None):
+    parser = argparse.ArgumentParser(description="Library Inventory Manager (single-file)")
+    parser.add_argument("--cli", action="store_true", help="Run interactive CLI")
+    parser.add_argument("--test", action="store_true", help="Run unit tests")
+    parser.add_argument("--init-files", action="store_true", help="Create README.md, .gitignore, requirements.txt in CWD")
+    parser.add_argument("--storage", type=str, default="catalog.json", help="Path to catalog.json (optional)")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None):
+    args = parse_args(argv)
+
+    # Set storage path if provided
+    storage = Path(args.storage) if args.storage else None
+
+    if args.init_files:
+        write_aux_files(Path("."))
+
+    if args.test:
+        # Run unit tests
+        # Ensure logs don't clutter test output too much
+        logging.getLogger().setLevel(logging.WARNING)
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestLibraryInventory)
+        runner = unittest.TextTestRunner(verbosity=2)
+        result = runner.run(suite)
+        # Exit with nonzero code if tests failed
+        sys.exit(0 if result.wasSuccessful() else 1)
+
+    # Default to CLI if --cli or no flags
+    run_cli(storage)
+
+
+if __name__ == "__main__":
+    main()
