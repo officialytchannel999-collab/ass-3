@@ -1,0 +1,136 @@
+import logging
+from pathlib import Path
+import json
+from book import Book
+
+# -----------------------------
+# Logging Configuration
+# -----------------------------
+LOG_FILE = Path("library.log")
+
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+logger = logging.getLogger(__name__)
+
+
+# -----------------------------
+# Inventory Class With Logging
+# -----------------------------
+class LibraryInventory:
+    def __init__(self, storage_path: Path):
+        self.storage_path = Path(storage_path)
+        self.books = []
+        self.load()
+
+    # Add book with error handling + logging
+    def add_book(self, book: Book):
+        try:
+            if self.search_by_isbn(book.isbn):
+                raise ValueError("Duplicate ISBN – cannot add book.")
+
+            self.books.append(book)
+            logger.info(f"Book added: {book.title} (ISBN: {book.isbn})")
+            self.save()
+
+        except ValueError as ve:
+            logger.error(f"Failed to add book: {ve}")
+            print("Error:", ve)
+
+        except Exception as e:
+            logger.error(f"Unexpected error while adding book: {e}")
+            print("Unexpected error occurred.")
+
+    # Search safely
+    def search_by_title(self, title):
+        return [b for b in self.books if title.lower() in b.title.lower()]
+
+    def search_by_isbn(self, isbn):
+        for b in self.books:
+            if b.isbn == isbn:
+                return b
+        return None
+
+    # Display list of all books
+    def display_all(self):
+        return [str(b) for b in self.books]
+
+    # -----------------------------
+    # File Persistence With Logging
+    # -----------------------------
+    def save(self):
+        """Save the list of books to JSON with exception handling."""
+        try:
+            data = [b.to_dict() for b in self.books]
+
+            # Safe write using a temp file
+            temp_file = self.storage_path.with_suffix(".tmp")
+
+            with temp_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+
+            temp_file.replace(self.storage_path)
+
+            logger.info("Catalog saved successfully.")
+
+        except Exception as e:
+            logger.error(f"Error saving catalog: {e}")
+            print("Failed to save catalog.")
+
+    def load(self):
+        """Load book data with full error handling."""
+        try:
+            if not self.storage_path.exists():
+                logger.info("Catalog file not found. Starting new catalog.")
+                self.books = []
+                return
+
+            with self.storage_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            # Reconstruct books
+            for item in data:
+                try:
+                    b = Book(
+                        item.get("title", ""),
+                        item.get("author", ""),
+                        item.get("isbn", ""),
+                        item.get("status", "available")
+                    )
+                    self.books.append(b)
+                except Exception as e:
+                    logger.error(f"Error loading a book entry: {e}")
+
+            logger.info("Catalog loaded successfully.")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Corrupted JSON file: {e}")
+            print("Catalog file is corrupted. Starting fresh.")
+            self.books = []
+
+        except Exception as e:
+            logger.error(f"Unexpected error while loading catalog: {e}")
+            print("An unexpected error occurred while loading.")
+
+        finally:
+            logger.info("Load operation completed.")
+
+
+# -----------------------------
+# Safe Input Example
+# -----------------------------
+def safe_input(prompt):
+    """Get validated user input with error handling."""
+    try:
+        return input(prompt)
+    except KeyboardInterrupt:
+        logger.error("User interrupted input.")
+        print("\nInput interrupted by user.")
+        return ""
+    except Exception as e:
+        logger.error(f"Input error: {e}")
+        print("Unexpected input error.")
+        return ""
