@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""
+Menu-driven CLI for Library Inventory Manager.
+
+Place this file next to your book.py and inventory.py (or your package).
+The script will try to initialize LibraryInventory with Path("catalog.json").
+If that fails (older/simple implementation), it will fall back to calling the no-arg constructor.
+"""
+
+from pathlib import Path
+import sys
+
+# Try to import LibraryInventory and Book from possible locations
+try:
+    # If you organized as a package like 'library_manager.inventory'
+    from library_manager.inventory import LibraryInventory
+    from library_manager.book import Book
+except Exception:
+    try:
+        # If files are in the same folder: inventory.py and book.py
+        from inventory import LibraryInventory
+        from book import Book
+    except Exception:
+        # Give a clear error and exit
+        print("Error: Couldn't import LibraryInventory and Book. Make sure inventory.py and book.py are present.")
+        raise
+
+def instantiate_inventory():
+    """
+    Try to instantiate LibraryInventory using Path("catalog.json") if supported,
+    otherwise fall back to no-arg constructor.
+    """
+    storage = Path("catalog.json")
+    try:
+        # many implementations accept a Path or string for storage
+        inv = LibraryInventory(storage)
+        return inv
+    except TypeError:
+        # fallback to no-arg constructor
+        try:
+            inv = LibraryInventory()
+            return inv
+        except Exception as e:
+            print("Failed to initialize LibraryInventory:", e)
+            sys.exit(1)
+    except Exception as e:
+        # other exceptions (e.g., IO during init) - still try no-arg
+        try:
+            inv = LibraryInventory()
+            return inv
+        except Exception:
+            print("Failed to initialize LibraryInventory:", e)
+            sys.exit(1)
+
+
+def safe_input(prompt: str) -> str:
+    """Read input but handle Ctrl-C / EOF gracefully."""
+    try:
+        return input(prompt)
+    except (KeyboardInterrupt, EOFError):
+        print("\nExiting. Goodbye!")
+        sys.exit(0)
+
+
+def print_menu():
+    print("\nLibrary Inventory Manager")
+    print("-------------------------")
+    print("1. Add Book")
+    print("2. Issue Book")
+    print("3. Return Book")
+    print("4. View All Books")
+    print("5. Search (Title / ISBN)")
+    print("6. Exit")
+
+
+def add_book_flow(inv):
+    print("\nAdd a New Book")
+    print("--------------")
+    title = safe_input("Title: ").strip()
+    if not title:
+        print("Title is required.")
+        return
+    author = safe_input("Author: ").strip()
+    if not author:
+        print("Author is required.")
+        return
+    isbn = safe_input("ISBN: ").strip()
+    if not isbn:
+        print("ISBN is required.")
+        return
+
+    # Create Book instance (accepts either dataclass or simple class)
+    try:
+        book = Book(title=title, author=author, isbn=isbn)
+    except TypeError:
+        # fallback if Book has different signature (unlikely)
+        book = Book(title, author, isbn)
+
+    try:
+        added = inv.add_book(book)
+        # Some implementations raise on duplicate, others return False
+        if added is False:
+            print("A book with that ISBN already exists.")
+        else:
+            print("Book added successfully.")
+    except ValueError as ve:
+        print("Error:", ve)
+    except Exception as e:
+        print("Unexpected error while adding book:", e)
+
+
+def issue_book_flow(inv):
+    print("\nIssue Book")
+    print("----------")
+    isbn = safe_input("Enter ISBN to issue: ").strip()
+    if not isbn:
+        print("ISBN is required.")
+        return
+
+    # Look up book first so we can print friendly messages
+    book = inv.search_by_isbn(isbn)
+    if book is None:
+        print("No book found with that ISBN.")
+        return
+
+    # If Book class has is_available() method, use it
+    try:
+        available = book.is_available()
+    except Exception:
+        # fallback: inspect status attribute
+        available = getattr(book, "status", "available") == "available"
+
+    if not available:
+        print("Book is already issued.")
+        return
+
+    # Try to issue via inventory API if available
+    try:
+        result = inv.issue_book(isbn)
+        # Some implementations return True/False, others may raise
+        if result:
+            print("Book issued successfully.")
+        else:
+            print("Could not issue the book (maybe already issued).")
+    except LookupError as le:
+        print("Error:", le)
+    except AttributeError:
+        # If inventory doesn't have issue_book(), modify book directly and try to save if possible
+        try:
+            if hasattr(book, "issue") and book.issue():
+                # try to persist if save() exists
+                if hasattr(inv, "save"):
+                    inv.save()
+                print("Book issued (manual).")
+            else:
+                print("Book could not be issued.")
+        except Exception as e:
+            print("Failed to issue book:", e)
+    except Exception as e:
+        print("Unexpected error while issuing book:", e)
+
+
+def return_book_flow(inv):
+    print("\nReturn Book")
+    print("-----------")
+    isbn = safe_input("Enter ISBN to return: ").strip()
+    if not isbn:
+        print("ISBN is required.")
+        return
+
+    book = inv.search_by_isbn(isbn)
+    if book is None:
+        print("No book found with that ISBN.")
+        return
+
+    try:
+        available = book.is_available()
+    except Exception:
+        available = getattr(book, "status", "available") == "available"
+
+    if available:
+        print("Book is not issued (already available).")
+        return
+
+    try:
+        result = inv.return_book(isbn)
+        if result:
+            print("Book returned successfully.")
+        else:
+            print("Could not return the book (maybe it was already available).")
+    except LookupError as le:
+        print("Error:", le)
+    except AttributeError:
+        # fallback: call return_book on Book and save
+        try:
+            if hasattr(book, "return_book") and book.return_book():
+                if hasattr(inv, "save"):
+                    inv.save()
+                print("Book returned (manual).")
+            else:
+                print("Book could not be returned.")
+        except Exception as e:
+            print("Failed to return book:", e)
+    except Exception as e:
+        print("Unexpected error while returning book:", e)
+
+
+def view_all_flow(inv):
+    print("\nAll Books in Catalog")
+    print("--------------------")
+    try:
+        entries = inv.display_all()
+        if not entries:
+            print("No books in catalog.")
+            return
+        # display nicely
+        for i, line in enumerate(entries, start=1):
+            print(f"{i}. {line}")
+    except Exception as e:
+        print("Failed to retrieve book list:", e)
+
+
+def search_flow(inv):
+    print("\nSearch")
+    print("------")
+    print("1. By Title (partial)")
+    print("2. By ISBN (exact)")
+    choice = safe_input("Choice (1/2): ").strip()
+    if choice == "1":
+        q = safe_input("Enter full or partial title: ").strip()
+        if not q:
+            print("Search query required.")
+            return
+        results = inv.search_by_title(q)
+        if not results:
+            print("No matching books found.")
+            return
+        for b in results:
+            print(b)
+    elif choice == "2":
+        q = safe_input("Enter ISBN: ").strip()
+        if not q:
+            print("ISBN required.")
+            return
+        b = inv.search_by_isbn(q)
+        if b:
+            print(b)
+        else:
+            print("No book found with that ISBN.")
+    else:
+        print("Invalid choice.")
+
+
+def main():
+    inv = instantiate_inventory()
+
+    while True:
+        print_menu()
+        choice = safe_input("Select option (1-6): ").strip()
+        if choice == "1":
+            add_book_flow(inv)
+        elif choice == "2":
+            issue_book_flow(inv)
+        elif choice == "3":
+            return_book_flow(inv)
+        elif choice == "4":
+            view_all_flow(inv)
+        elif choice == "5":
+            search_flow(inv)
+        elif choice == "6":
+            print("Goodbye!")
+            # attempt to save before exiting if save exists
+            if hasattr(inv, "save"):
+                try:
+                    inv.save()
+                except Exception:
+                    pass
+            break
+        else:
+            print("Invalid selection — choose a number between 1 and 6.")
+
+
+if __name__ == "__main__":
+    main()
